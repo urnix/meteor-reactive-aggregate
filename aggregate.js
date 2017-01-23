@@ -1,55 +1,70 @@
-ReactiveAggregate = function (sub, collection, pipeline, options) {
+ReactiveObservableAggregate = function (sub, collection, pipeline, options) {
   var defaultOptions = {
-    observeSelector: {},
-    observeOptions: {},
-    clientCollection: collection._name
+    observeSelector: {}, observeOptions: {}, clientCollection: collection._name, watchItems: false
   };
   options = _.extend(defaultOptions, options);
 
   var initializing = true;
-  sub._ids = {};
-  sub._iteration = 1;
-
-  function update() {
-    if (initializing) return;
-    // add and update documents on the client
-    collection.aggregate(pipeline).forEach(function (doc) {
-      if (!sub._ids[doc._id]) {
-        sub.added(options.clientCollection, doc._id, doc);
-      } else {
-        sub.changed(options.clientCollection, doc._id, doc);
-      }
-      sub._ids[doc._id] = sub._iteration;
-    });
-    // remove documents not in the result anymore
-    _.forEach(sub._ids, function (v, k) {
-      if (v != sub._iteration) {
-        delete sub._ids[k];
-        sub.removed(options.clientCollection, k);
-      }
-    });
-    sub._iteration++;
+  if (options.watchItems) {
+    sub.items = [];
+  } else {
+    sub._ids = {};
+    sub._iteration = 1;
   }
 
-  // track any changes on the collection used for the aggregation
+  function update () {
+    if (initializing) return;
+    if (options.watchItems) {
+      var items = collection.aggregate(pipeline);
+      items.forEach(function (doc) {
+        if (!_.findWhere(sub.items, doc)) {
+          var index = _.pluck(sub.items, '_id').indexOf(doc._id);
+          if (index < 0) {
+            sub.added(options.clientCollection, doc._id, doc);
+            sub.items.push(doc);
+          } else {
+            sub.changed(options.clientCollection, doc._id, doc);
+            sub.items[index] = doc;
+          }
+        }
+      });
+      var toRemove = [];
+      _.forEach(sub.items, function (doc) {
+        if (!_.findWhere(items, {_id: doc._id})) {
+          toRemove.push(doc);
+          sub.removed(options.clientCollection, doc._id);
+        }
+      });
+      sub.items = _.difference(sub.items, toRemove);
+    } else {
+      collection.aggregate(pipeline).forEach(function (doc) {
+        if (!sub._ids[doc._id]) {
+          sub.added(options.clientCollection, doc._id, doc);
+        } else {
+          sub.changed(options.clientCollection, doc._id, doc);
+        }
+        sub._ids[doc._id] = sub._iteration;
+      });
+      _.forEach(sub._ids, function (v, k) {
+        if (v != sub._iteration) {
+          delete sub._ids[k];
+          sub.removed(options.clientCollection, k);
+        }
+      });
+      sub._iteration++;
+    }
+  }
+
   var query = collection.find(options.observeSelector, options.observeOptions);
   var handle = query.observeChanges({
-    added: update,
-    changed: update,
-    removed: update,
-    error: function (err) {
+    added: update, changed: update, removed: update, error: function (err) {
       throw err;
     }
   });
-  // observeChanges() will immediately fire an "added" event for each document in the query
-  // these are skipped using the initializing flag
   initializing = false;
-  // send an initial result set to the client
   update();
-  // mark the subscription as ready
   sub.ready();
 
-  // stop observing the cursor when the client unsubscribes
   sub.onStop(function () {
     handle.stop();
   });
